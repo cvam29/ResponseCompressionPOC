@@ -6,7 +6,7 @@ public class CompressedJsonFunction(ILogger<CompressedJsonFunction> log)
     [OpenApiOperation(operationId: "RunCompressedJson", tags: ["compression"])]
     [OpenApiResponseWithBody(HttpStatusCode.OK, "application/json", typeof(object), Description = "Compressed JSON response")]
     public async Task<IActionResult> RunCompressedJson(
-        [HttpTrigger(AuthorizationLevel.Function, "get", "post")] HttpRequest req,
+        [HttpTrigger(AuthorizationLevel.Function, "get", Route = "compressed-json")] HttpRequest req,
         CancellationToken cancellationToken = default)
     {
         log.LogInformation("Processing request with potential compression...");
