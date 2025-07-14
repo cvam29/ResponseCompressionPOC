@@ -1,6 +1,4 @@
-﻿
-
-namespace ResponseCompression.Functions;
+﻿namespace ResponseCompression.Functions;
 
 public class CompressedJsonFunction(ILogger<CompressedJsonFunction> log)
 {
@@ -8,11 +6,13 @@ public class CompressedJsonFunction(ILogger<CompressedJsonFunction> log)
     [OpenApiOperation(operationId: "RunCompressedJson", tags: ["compression"])]
     [OpenApiResponseWithBody(HttpStatusCode.OK, "application/json", typeof(object), Description = "Compressed JSON response")]
     public async Task<IActionResult> RunCompressedJson(
-        [HttpTrigger(AuthorizationLevel.Function, "get", "post")] HttpRequest req)
+        [HttpTrigger(AuthorizationLevel.Function, "get", "post")] HttpRequest req,
+        CancellationToken cancellationToken = default)
     {
         log.LogInformation("Processing request with potential compression...");
 
-        req.EnableResponseCompression();
+        // Enable compression with cancellation token support
+        req.EnableResponseCompression(cancellationToken);
 
         var response = req.HttpContext.Response;
         response.ContentType = "application/json";
@@ -20,15 +20,17 @@ public class CompressedJsonFunction(ILogger<CompressedJsonFunction> log)
         var payload = new
         {
             Topic = "Hello World... I'm Compressed!",
-            Body = "If I was a big JSON payload, I’d be nicely packed for transmission!"
+            Body = "If I was a big JSON payload, I'd be nicely packed for transmission!",
+            Timestamp = DateTimeOffset.UtcNow,
+            Environment.ProcessId,
+            ThreadId = Environment.CurrentManagedThreadId
         };
 
-        using (var writer = new StreamWriter(response.Body, leaveOpen: true))
-        {
-            var json = JsonConvert.SerializeObject(payload);
-            await writer.WriteAsync(json);
-            await writer.FlushAsync();
-        }
+        var json = JsonConvert.SerializeObject(payload);
+        
+        // Use the optimized WriteCompressedTextAsync method
+        await req.HttpContext.WriteCompressedTextAsync(json.AsMemory(), cancellationToken: cancellationToken);
+        await response.Body.FlushAsync(cancellationToken);
         await req.FinalizeCompressionAsync();
 
         return new EmptyResult(); // Nothing more to return, already written to response body.
