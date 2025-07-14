@@ -1,7 +1,5 @@
 ﻿using System.Runtime.CompilerServices;
 
-namespace ResponseCompression.Extensions;
-
 /// <summary>
 /// BBernard / CajunCoding (MIT License)
 /// Original Gist: https://gist.github.com/cajuncoding/a4a7b590986fd848b5040da83979796c
@@ -17,50 +15,39 @@ namespace ResponseCompression.Extensions;
 ///     GraphQL Query results which can significantly improve performance in use cases with large query result sets.
 /// </summary>
 
+
+namespace ResponseCompression.Extensions;
+
 internal static class AzureFunctionsInProcessCompressionExtensions
 {
     private const string CompressionStreamKey = "CompressionStream";
     private const string CompressionCancellationTokenKey = "CompressionCancellationToken";
-    
-    // Use FrozenSet for O(1) lookups with immutable data - .NET 8 feature
+
     private static readonly FrozenSet<string> SupportedEncodings = new[] { "br", "gzip", "deflate" }.ToFrozenSet();
-    
-    // Priority ordered encodings for better compression efficiency
-    private static readonly string[] EncodingPriority = { "br", "gzip", "deflate" };
-    
-    // Thread-safe cache for parsed encodings to avoid re-parsing
+    private static readonly string[] EncodingPriority = ["br", "gzip", "deflate"];
     private static readonly ConcurrentDictionary<string, string[]> EncodingCache = new();
-    
-    // Reusable buffer pool for string operations
     private static readonly ArrayPool<char> CharPool = ArrayPool<char>.Shared;
 
-    public static HttpRequest EnableResponseCompression(this HttpRequest request, CancellationToken cancellationToken = default)
-        => request.HttpContext.EnableResponseCompression(CompressionLevel.Fastest, cancellationToken).Request;
+    public static HttpRequest EnableResponseCompression(this HttpRequest request, CancellationToken cancellationToken = default) =>
+        request.HttpContext.EnableResponseCompression(CompressionLevel.Fastest, cancellationToken).Request;
 
     public static HttpContext EnableResponseCompression(this HttpContext context, CompressionLevel level = CompressionLevel.Fastest, CancellationToken cancellationToken = default)
     {
-        // Store cancellation token for async operations
         context.Items[CompressionCancellationTokenKey] = cancellationToken;
-        
-        var acceptEncodingHeader = context.Request.Headers["Accept-Encoding"];
-        if (acceptEncodingHeader.Count == 0) return context;
 
-        // Use efficient string processing with ReadOnlySpan
-        var bestEncoding = GetBestSupportedEncoding(acceptEncodingHeader);
-        if (bestEncoding == null) return context;
+        var acceptEncoding = context.Request.Headers["Accept-Encoding"];
+        if (acceptEncoding.Count == 0) return context;
+
+        var bestEncoding = GetBestSupportedEncoding(acceptEncoding);
+        if (bestEncoding is null) return context;
 
         var response = context.Response;
         var originalBody = response.Body;
 
-        // Enable synchronous IO for compression streams
-        var feature = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpBodyControlFeature>();
-        if (feature != null)
-        {
-            feature.AllowSynchronousIO = true;
-        }
+        context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpBodyControlFeature>()?.Let(f => f.AllowSynchronousIO = true);
 
         var compressedStream = CreateCompressionStream(originalBody, bestEncoding, level);
-        if (compressedStream != null)
+        if (compressedStream is not null)
         {
             response.Headers["Content-Encoding"] = new StringValues(bestEncoding);
             response.Body = compressedStream;
@@ -71,96 +58,65 @@ internal static class AzureFunctionsInProcessCompressionExtensions
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static string GetBestSupportedEncoding(StringValues acceptEncodingHeader)
+    private static string GetBestSupportedEncoding(StringValues headers)
     {
-        if (acceptEncodingHeader.Count == 1)
-        {
-            return GetBestSupportedEncodingFromSingle(acceptEncodingHeader[0]);
-        }
-
-        // Handle multiple header values
-        var allEncodings = string.Join(",", acceptEncodingHeader);
-        return GetBestSupportedEncodingFromSingle(allEncodings);
+        return headers.Count == 1
+            ? GetBestSupportedEncodingFromSingle(headers[0])
+            : GetBestSupportedEncodingFromSingle(string.Join(",", headers));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static string GetBestSupportedEncodingFromSingle(string headerValue)
+    private static string GetBestSupportedEncodingFromSingle(string value)
     {
-        if (string.IsNullOrEmpty(headerValue)) return null;
+        if (string.IsNullOrEmpty(value)) return null;
 
-        // Use cache for frequently seen header values
-        if (EncodingCache.TryGetValue(headerValue, out var cachedEncodings))
+        if (!EncodingCache.TryGetValue(value, out var parsed))
         {
-            return GetBestEncodingFromArray(cachedEncodings);
+            parsed = ParseAcceptEncodingHeader(value.AsSpan());
+            EncodingCache.TryAdd(value, parsed);
         }
 
-        // Parse encodings efficiently using Span<char>
-        var parsedEncodings = ParseAcceptEncodingHeader(headerValue.AsSpan());
-        
-        // Cache the result for future use
-        EncodingCache.TryAdd(headerValue, parsedEncodings);
-        
-        return GetBestEncodingFromArray(parsedEncodings);
-    }
+        foreach (var encoding in EncodingPriority)
+            if (parsed.Contains(encoding)) return encoding;
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static string GetBestEncodingFromArray(string[] encodings)
-    {
-        // Return the highest priority encoding that's supported
-        foreach (var priorityEncoding in EncodingPriority)
-        {
-            if (encodings.Contains(priorityEncoding))
-            {
-                return priorityEncoding;
-            }
-        }
         return null;
     }
 
-    private static string[] ParseAcceptEncodingHeader(ReadOnlySpan<char> headerValue)
+    private static string[] ParseAcceptEncodingHeader(ReadOnlySpan<char> span)
     {
-        var encodings = new List<string>();
-        var buffer = CharPool.Rent(64); // Rent buffer for temporary operations
-        
+        var encodings = new List<string>(3);
+        var buffer = CharPool.Rent(64);
+
         try
         {
             int start = 0;
-            for (int i = 0; i <= headerValue.Length; i++)
+
+            for (int i = 0; i <= span.Length; i++)
             {
-                if (i == headerValue.Length || headerValue[i] == ',')
+                if (i == span.Length || span[i] == ',')
                 {
                     if (i > start)
                     {
-                        var encodingSpan = headerValue.Slice(start, i - start);
-                        
-                        // Find semicolon (quality factor separator)
-                        var semicolonIndex = encodingSpan.IndexOf(';');
-                        if (semicolonIndex >= 0)
+                        var slice = span.Slice(start, i - start);
+                        var semicolon = slice.IndexOf(';');
+                        if (semicolon >= 0) slice = slice.Slice(0, semicolon);
+
+                        slice = slice.Trim();
+                        if (slice.Length == 0 || slice.Length > buffer.Length)
                         {
-                            encodingSpan = encodingSpan.Slice(0, semicolonIndex);
+                            start = i + 1;
+                            continue;
                         }
-                        
-                        // Trim and convert to lowercase efficiently
-                        var trimmedSpan = encodingSpan.Trim();
-                        if (trimmedSpan.Length > 0 && trimmedSpan.Length < buffer.Length)
-                        {
-                            // Copy to buffer and convert to lowercase
-                            trimmedSpan.CopyTo(buffer.AsSpan(0, trimmedSpan.Length));
-                            var bufferSpan = buffer.AsSpan(0, trimmedSpan.Length);
-                            
-                            // Convert to lowercase in-place
-                            for (int j = 0; j < bufferSpan.Length; j++)
-                            {
-                                bufferSpan[j] = char.ToLowerInvariant(bufferSpan[j]);
-                            }
-                            
-                            var encoding = new string(bufferSpan);
-                            
-                            if (SupportedEncodings.Contains(encoding))
-                            {
-                                encodings.Add(encoding);
-                            }
-                        }
+
+                        slice.CopyTo(buffer);
+                        var lowered = buffer.AsSpan(0, slice.Length);
+                        for (int j = 0; j < lowered.Length; j++)
+                            lowered[j] = char.ToLowerInvariant(lowered[j]);
+
+                        var encoding = new string(lowered.Slice(0, slice.Length));
+
+                        if (SupportedEncodings.Contains(encoding))
+                            encodings.Add(encoding);
                     }
                     start = i + 1;
                 }
@@ -175,43 +131,33 @@ internal static class AzureFunctionsInProcessCompressionExtensions
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Stream CreateCompressionStream(Stream originalBody, string encoding, CompressionLevel level)
-    {
-        return encoding switch
+    private static Stream CreateCompressionStream(Stream originalBody, string encoding, CompressionLevel level) =>
+        encoding switch
         {
             "gzip" => new GZipStream(originalBody, level, leaveOpen: true),
             "br" => new BrotliStream(originalBody, level, leaveOpen: true),
             "deflate" => new DeflateStream(originalBody, level, leaveOpen: true),
             _ => null
         };
-    }
 
-    public static ValueTask FinalizeCompressionAsync(this HttpRequest request)
-        => request.HttpContext.FinalizeCompressionAsync();
+    public static ValueTask FinalizeCompressionAsync(this HttpRequest request) =>
+        request.HttpContext.FinalizeCompressionAsync();
 
     public static async ValueTask FinalizeCompressionAsync(this HttpContext context)
     {
-        var cancellationToken = context.Items.TryGetValue(CompressionCancellationTokenKey, out var tokenObj) 
-            ? (CancellationToken)tokenObj 
-            : CancellationToken.None;
-
         if (context.Items.TryGetValue(CompressionStreamKey, out var streamObj) && streamObj is Stream compressionStream)
         {
+            var cancellationToken = context.Items.TryGetValue(CompressionCancellationTokenKey, out var tokenObj)
+                ? (CancellationToken)tokenObj
+                : CancellationToken.None;
+
             try
             {
-                // Use cancellation token in async operations
                 await compressionStream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 await compressionStream.DisposeAsync().ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
-            {
-                // Handle cancellation gracefully
-                throw;
-            }
-            catch (Exception)
-            {
-                // Ignore disposal errors that might occur with compression streams
-            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* Swallow disposal exceptions */ }
             finally
             {
                 context.Items.Remove(CompressionStreamKey);
@@ -220,30 +166,17 @@ internal static class AzureFunctionsInProcessCompressionExtensions
         }
     }
 
-    /// <summary>
-    /// Optimized method for writing compressed data directly from byte arrays
-    /// </summary>
     public static async ValueTask WriteCompressedAsync(this HttpContext context, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
-        if (context.Items.TryGetValue(CompressionStreamKey, out var streamObj) && streamObj is Stream compressionStream)
-        {
-            await compressionStream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            await context.Response.Body.WriteAsync(data, cancellationToken).ConfigureAwait(false);
-        }
+        var stream = context.Items.TryGetValue(CompressionStreamKey, out var obj) && obj is Stream s ? s : context.Response.Body;
+        await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Optimized method for writing compressed text data
-    /// </summary>
     public static async ValueTask WriteCompressedTextAsync(this HttpContext context, ReadOnlyMemory<char> text, Encoding encoding = null, CancellationToken cancellationToken = default)
     {
         encoding ??= Encoding.UTF8;
-        
-        // Use ArrayPool for temporary byte buffer
         var byteBuffer = ArrayPool<byte>.Shared.Rent(encoding.GetMaxByteCount(text.Length));
+
         try
         {
             var byteCount = encoding.GetBytes(text.Span, byteBuffer);
@@ -254,4 +187,11 @@ internal static class AzureFunctionsInProcessCompressionExtensions
             ArrayPool<byte>.Shared.Return(byteBuffer);
         }
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Let<T>(this T obj, Action<T> action) where T : class
+    {
+        if (obj is not null) action(obj);
+    }
 }
+
