@@ -12,3 +12,4 @@ global using Microsoft.Extensions.Logging;
 global using Microsoft.OpenApi.Models;
 global using ResponseCompression.Extensions;
 global using System.Net;
+global using Newtonsoft.Json;
