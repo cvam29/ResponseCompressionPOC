@@ -120,13 +120,7 @@ Extensions/AzureFunctionsInProcessCompressionExtensions.cs
 - Not suitable for binary content (e.g., images)
 - Not using built-in ASP.NET Core middleware
 
----
 
-## 📄 License
-
-MIT License. See [LICENSE](LICENSE) for details.
-
----
 
 ## 🙌 Contributions
 
